@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:aaronhernandez.me)",
+      "Bash(npm install:*)"
+    ],
+    "deny": []
+  }
+}

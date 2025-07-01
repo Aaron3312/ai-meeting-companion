@@ -18,7 +18,8 @@ import {
   Zap
 } from 'lucide-react';
 import { useAdvancedSpeechRecognition } from '@/hooks/useAdvancedSpeechRecognition';
-import { useSystemAudioSpeechRecognition } from '@/hooks/useSystemAudioSpeechRecognition';
+import { useSystemAudioWithLocalWhisper } from '@/hooks/useSystemAudioWithLocalWhisper';
+import { useWebAudioRecorder } from '@/hooks/useWebAudioRecorder';
 
 interface TranscriptEntry {
   id: string;
@@ -41,6 +42,8 @@ export default function HybridAudioTranscription({
   const [activeSource, setActiveSource] = useState<'microphone' | 'system' | 'both'>('both');
   const [isRecording, setIsRecording] = useState(false);
   const [isClient, setIsClient] = useState(false);
+  const [useLocalService, setUseLocalService] = useState(true); // Siempre usar servicio local
+  const [useWebAudio, setUseWebAudio] = useState(false); // Nueva opción Web Audio
 
   // Evitar problemas de hidratación
   useEffect(() => {
@@ -81,16 +84,18 @@ export default function HybridAudioTranscription({
     }, [])
   });
 
-  // Hook para reconocimiento de audio del sistema
+  // Hook para reconocimiento de audio del sistema (híbrido con GPU local)
   const {
     isRecording: systemRecording,
     transcript: systemTranscript,
     error: systemError,
+    localConnected,
     startRecording: startSystem,
     stopRecording: stopSystem,
     resetTranscript: resetSystem
-  } = useSystemAudioSpeechRecognition({
+  } = useSystemAudioWithLocalWhisper({
     lang: 'es-ES',
+    useLocalService,
     onTranscript: useCallback((text: string, isFinal: boolean) => {
       if (isFinal && text.trim()) {
         const entry: TranscriptEntry = {
@@ -108,6 +113,34 @@ export default function HybridAudioTranscription({
     }, [])
   });
 
+  // Hook para Web Audio API (WAV-based)
+  const {
+    isRecording: webAudioRecording,
+    transcript: webAudioTranscript,
+    error: webAudioError,
+    startRecording: startWebAudio,
+    stopRecording: stopWebAudio,
+    resetTranscript: resetWebAudio
+  } = useWebAudioRecorder({
+    lang: 'es-ES',
+    useLocalService: true,
+    onTranscript: useCallback((text: string, isFinal: boolean) => {
+      if (isFinal && text.trim()) {
+        const entry: TranscriptEntry = {
+          id: `wav-${Date.now()}`,
+          text: text.trim(),
+          source: 'system',
+          timestamp: new Date()
+        };
+        setTranscriptEntries(prev => [...prev, entry]);
+        onTranscriptUpdate?.(text, true);
+      }
+    }, [onTranscriptUpdate]),
+    onError: useCallback((error: string) => {
+      console.error('Web Audio error:', error);
+    }, [])
+  });
+
   // Control unificado de grabación
   const toggleRecording = useCallback(async () => {
     console.log('🎛️ Toggle recording clicked:', { isRecording, activeSource });
@@ -115,7 +148,11 @@ export default function HybridAudioTranscription({
     if (isRecording) {
       console.log('🛑 Deteniendo grabación...');
       stopMic();
-      stopSystem();
+      if (useWebAudio) {
+        stopWebAudio();
+      } else {
+        stopSystem();
+      }
       setIsRecording(false);
     } else {
       console.log('▶️ Iniciando grabación con fuente:', activeSource);
@@ -129,14 +166,20 @@ export default function HybridAudioTranscription({
       if (activeSource === 'system' || activeSource === 'both') {
         console.log('🖥️ Iniciando captura de sistema...');
         try {
-          await startSystem();
+          if (useWebAudio) {
+            console.log('🎵 Usando Web Audio API (WAV)...');
+            await startWebAudio();
+          } else {
+            console.log('🎬 Usando MediaRecorder (WebM)...');
+            await startSystem();
+          }
           console.log('✅ Sistema de audio iniciado exitosamente');
         } catch (error) {
           console.error('❌ Error iniciando sistema de audio:', error);
         }
       }
     }
-  }, [isRecording, activeSource, startMic, stopMic, startSystem, stopSystem]);
+  }, [isRecording, activeSource, startMic, stopMic, startSystem, stopSystem, useWebAudio, startWebAudio, stopWebAudio]);
 
   // Reset todo
   const resetAll = useCallback(() => {
@@ -144,6 +187,7 @@ export default function HybridAudioTranscription({
     resetSystem();
     setTranscriptEntries([]);
   }, [resetMic, resetSystem]);
+
 
   // Copiar transcripción completa
   const copyAll = useCallback(() => {
@@ -156,13 +200,13 @@ export default function HybridAudioTranscription({
 
   // Actualizar estado de grabación
   useEffect(() => {
-    const recording = micListening || systemRecording;
+    const recording = micListening || systemRecording || webAudioRecording;
     if (recording !== isRecording) {
       setIsRecording(recording);
     }
-  }, [micListening, systemRecording, isRecording]);
+  }, [micListening, systemRecording, webAudioRecording, isRecording]);
 
-  const combinedError = micError || systemError;
+  const combinedError = micError || systemError || webAudioError;
   const hasTranscripts = transcriptEntries.length > 0 || micInterim;
 
   return (
@@ -176,7 +220,7 @@ export default function HybridAudioTranscription({
                 Transcripción Híbrida
               </CardTitle>
               <CardDescription>
-                Micrófono + Audio del Sistema con OpenAI Whisper
+                Micrófono + Audio del Sistema con GPU Local (RTX 4070 Super)
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -198,6 +242,12 @@ export default function HybridAudioTranscription({
                   Sistema
                 </Badge>
               )}
+              {useLocalService && localConnected && (
+                <Badge variant="outline" className="text-green-600 border-green-200">
+                  <Zap className="h-3 w-3 mr-1" />
+                  GPU Local
+                </Badge>
+              )}
               {combinedError && !combinedError.includes('Continúa hablando') && (
                 <Badge variant="destructive">
                   Error
@@ -208,6 +258,56 @@ export default function HybridAudioTranscription({
         </CardHeader>
         
         <CardContent className="space-y-4">
+          {/* Selector de servicio */}
+          <div className="space-y-3">
+            <label className="text-sm font-medium">Servicio de Transcripción:</label>
+            <div className="grid grid-cols-1 gap-2">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setUseLocalService(true)}
+                disabled={isRecording}
+                className="flex items-center gap-2"
+              >
+                <Zap className="h-4 w-4" />
+                GPU Local {localConnected ? '✅' : '❌'} (Único Disponible)
+              </Button>
+            </div>
+            <div className="text-xs text-gray-600 bg-yellow-50 p-2 rounded">
+              💡 <strong>Solo GPU Local:</strong> OpenAI API deshabilitada. Ejecuta <code>python transcription_service.py</code> en CMD.
+            </div>
+          </div>
+
+          {/* Selector de método de captura */}
+          <div className="space-y-3">
+            <label className="text-sm font-medium">Método de Captura:</label>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant={!useWebAudio ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setUseWebAudio(false)}
+                disabled={isRecording}
+                className="flex items-center gap-2"
+              >
+                <Monitor className="h-4 w-4" />
+                MediaRecorder (WebM)
+              </Button>
+              <Button
+                variant={useWebAudio ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setUseWebAudio(true)}
+                disabled={isRecording}
+                className="flex items-center gap-2"
+              >
+                <Zap className="h-4 w-4" />
+                Web Audio (WAV) ⚡
+              </Button>
+            </div>
+            <div className="text-xs text-gray-600 bg-blue-50 p-2 rounded">
+              🔧 <strong>Experimentar:</strong> Web Audio API genera WAV nativo, podría resolver los chunks corruptos de WebM.
+            </div>
+          </div>
+
           {/* Selector de fuente */}
           <div className="space-y-3">
             <label className="text-sm font-medium">Fuente de Audio:</label>
@@ -345,6 +445,10 @@ export default function HybridAudioTranscription({
             <div className="mt-2 text-xs text-blue-600">
               💡 <strong>Instrucciones:</strong> Para capturar audio de Chrome, selecciona "Solo Sistema" o "Ambos", 
               luego en el diálogo de Chrome selecciona la ventana/tab y marca "Compartir audio del sistema".
+              <div className="mt-1 text-green-600">
+                🚀 <strong>GPU Local:</strong> Ejecuta <code>python transcription_service.py</code> 
+                en CMD de Windows. ¡Transcripción gratuita y ultra rápida con tu RTX 4070 Super!
+              </div>
             </div>
           </div>
 
